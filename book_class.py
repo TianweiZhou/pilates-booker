@@ -51,6 +51,11 @@ WAIT_FOR_RELEASE = os.environ.get("WAIT_FOR_RELEASE", "true").lower() == "true"
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 MAX_POLL_MINUTES = int(os.environ.get("MAX_POLL_MINUTES", "20"))
 SKIP_LOGIN = os.environ.get("SKIP_LOGIN", "false").lower() == "true"  # testing only
+# The studio releases the Saturday that is 30 days after release Thursday.
+TARGET_OFFSET_DAYS = int(os.environ.get("TARGET_OFFSET_DAYS", "30"))
+# If the expected date hasn't opened after this many seconds, fall back to
+# scanning every Saturday (in case the studio changes its release pattern).
+FALLBACK_SCAN_AFTER = int(os.environ.get("FALLBACK_SCAN_AFTER", "180"))
 LOOKAHEAD_DAYS = int(os.environ.get("LOOKAHEAD_DAYS", "45"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
@@ -265,6 +270,22 @@ def candidate_saturdays() -> list[datetime]:
     return list(reversed(sats))
 
 
+def expected_target() -> datetime:
+    """The Saturday expected to be released today (Thursday + 30 days)."""
+    d = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0) \
+        + timedelta(days=TARGET_OFFSET_DAYS)
+    while d.weekday() != 5:
+        d += timedelta(days=1)
+    return d
+
+
+def seconds_to_release() -> float:
+    now = datetime.now(TZ)
+    release = now.replace(hour=RELEASE_HOUR, minute=RELEASE_MINUTE,
+                          second=0, microsecond=0)
+    return (release - now).total_seconds()
+
+
 def complete_booking(page) -> None:
     """From the booking form: waiver + plan payment + final book click."""
     page.wait_for_timeout(2500)
@@ -367,31 +388,50 @@ def main() -> None:
             dismiss_cookie_banner(page)
         else:
             login(page)
-            already_booked = booked_dates(page)
+            # Only during the pre-release wait — never in the booking race.
+            if not WAIT_FOR_RELEASE or seconds_to_release() > 90:
+                already_booked = booked_dates(page)
+
+        target = expected_target()
+        if (target.year, target.month, target.day) in already_booked:
+            log(f"Expected release date {target:%B %d} is already booked — "
+                "nothing to do.")
+            browser.close()
+            return
+        log(f"Target: {target:%A %B %d, %Y} at 11:00 a.m. "
+            f"(fallback scan after {FALLBACK_SCAN_AFTER}s)")
 
         if WAIT_FOR_RELEASE:
             wait_until_release()
 
-        deadline = time.time() + MAX_POLL_MINUTES * 60
+        start = time.time()
+        deadline = start + MAX_POLL_MINUTES * 60
+        fallback_at = start + FALLBACK_SCAN_AFTER
         attempt = 0
         while True:
             attempt += 1
-            log(f"Attempt {attempt}: scanning for the newest open Saturday…")
             page.goto(SERVICE_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(1500)
             hide_chat_widget(page)
 
-            slot = None
-            for sat in candidate_saturdays():
-                if (sat.year, sat.month, sat.day) in already_booked:
-                    log(f"Skipping {sat:%B %d} — you already have a booking.")
-                    continue
-                slot = open_slot_for(page, sat)
-                if slot is not None:
-                    log(f"Open 11:00 a.m. slot found on {sat:%A %B %d, %Y}")
-                    break
+            slot, chosen = None, None
+            if time.time() < fallback_at:
+                # Fast path: check only the expected release date.
+                slot, chosen = open_slot_for(page, target), target
+            else:
+                # Fallback: scan every unbooked Saturday, farthest first.
+                log(f"Attempt {attempt}: expected date not open — full scan.")
+                for sat in candidate_saturdays():
+                    if (sat.year, sat.month, sat.day) in already_booked:
+                        log(f"Skipping {sat:%B %d} — already booked.")
+                        continue
+                    slot = open_slot_for(page, sat)
+                    if slot is not None:
+                        chosen = sat
+                        break
 
             if slot is not None:
+                log(f"Open 11:00 a.m. slot on {chosen:%A %B %d, %Y} — booking!")
                 # Wix renders a styled chip over the real input, so a normal
                 # click gets intercepted; it also auto-checks the input when
                 # the day has a single slot.
@@ -401,7 +441,7 @@ def main() -> None:
                     already = False
                 if not already:
                     slot.click(force=True)
-                page.wait_for_timeout(600)
+                page.wait_for_timeout(400)
                 shot(page, "slot-selected")
                 page.get_by_role("button",
                                  name=re.compile(r"^\s*next\s*$", re.I)).first.click()
@@ -413,8 +453,9 @@ def main() -> None:
                 raise RuntimeError(
                     f"No open Saturday slot appeared within "
                     f"{MAX_POLL_MINUTES} minutes. Screenshot saved.")
-            log("No open slot yet — retrying in 15s…")
-            time.sleep(15)
+            if attempt % 10 == 0:
+                log(f"Attempt {attempt}: not open yet, still retrying…")
+            time.sleep(2)
 
         browser.close()
 
