@@ -1,0 +1,55 @@
+name: Book Saturday Pilates class
+
+on:
+  schedule:
+    # GitHub cron is UTC and often fires late, so start ~35 min early and let
+    # the script wait until exactly 11:00 a.m. Toronto time.
+    #   14:25 UTC = 10:25 EDT (summer run)
+    #   15:25 UTC = 10:25 EST (winter run)
+    # The script exits immediately if it is >45 min before release, so only
+    # one of the two runs proceeds on any given Thursday.
+    - cron: "25 14 * * 4"
+    - cron: "25 15 * * 4"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (stop before the final booking click)"
+        type: boolean
+        default: true
+      wait_for_release:
+        description: "Wait for Thursday 11:00 ET before booking"
+        type: boolean
+        default: false
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Book the class
+        env:
+          PILATES_EMAIL: ${{ secrets.PILATES_EMAIL }}
+          PILATES_PASSWORD: ${{ secrets.PILATES_PASSWORD }}
+          # Manual runs let you override; scheduled runs use the defaults.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          WAIT_FOR_RELEASE: ${{ github.event_name == 'workflow_dispatch' && inputs.wait_for_release || 'true' }}
+        run: python book_class.py
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_id }}
+          path: screenshots/
+          if-no-files-found: ignore
