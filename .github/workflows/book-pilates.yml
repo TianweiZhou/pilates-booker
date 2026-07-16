@@ -2,14 +2,14 @@ name: Book Saturday Pilates class
 
 on:
   schedule:
-    # GitHub cron is UTC and often fires late, so start ~35 min early and let
-    # the script wait until exactly 11:00 a.m. Toronto time.
-    #   14:25 UTC = 10:25 EDT (summer run)
-    #   15:25 UTC = 10:25 EST (winter run)
-    # The script exits immediately if it is >45 min before release, so only
-    # one of the two runs proceeds on any given Thursday.
-    - cron: "25 14 * * 4"
-    - cron: "25 15 * * 4"
+    # GitHub cron fires late — sometimes by 60-90+ minutes — so start hours
+    # early and let the script sleep until exactly 11:00 a.m. Toronto time.
+    #   12:30 UTC = 8:30 EDT / 7:30 EST
+    #   13:30 UTC = 9:30 EDT / 8:30 EST  (staggered backup)
+    # The concurrency group serializes them: the backup starts only after the
+    # primary finishes, sees the date already booked, and exits.
+    - cron: "30 12 * * 4"
+    - cron: "30 13 * * 4"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -21,14 +21,18 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: book-pilates
+  cancel-in-progress: false
+
 jobs:
   book:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -48,7 +52,7 @@ jobs:
 
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: screenshots-${{ github.run_id }}
           path: screenshots/

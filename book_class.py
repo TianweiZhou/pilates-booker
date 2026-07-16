@@ -60,9 +60,9 @@ LOOKAHEAD_DAYS = int(os.environ.get("LOOKAHEAD_DAYS", "45"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
 RELEASE_HOUR, RELEASE_MINUTE = 11, 0
-# If we are started more than this long before release, another (better-timed)
-# scheduled run will handle today — exit so two runs don't race each other.
-MAX_EARLY_MINUTES = 45
+# GitHub cron fires unpredictably late, so runs start hours early and sleep.
+# Only bail out if we somehow start earlier than this before release.
+MAX_EARLY_MINUTES = int(os.environ.get("MAX_EARLY_MINUTES", "300"))
 
 SHOTS = Path("screenshots")
 SHOTS.mkdir(exist_ok=True)
@@ -156,8 +156,7 @@ def wait_until_release() -> None:
 
     if delta > MAX_EARLY_MINUTES * 60:
         log(f"More than {MAX_EARLY_MINUTES} min before release "
-            f"({release:%H:%M %Z}) — a later scheduled run will handle it. "
-            "Exiting.")
+            f"({release:%H:%M %Z}) — refusing to wait that long. Exiting.")
         sys.exit(0)
     if delta < -MAX_POLL_MINUTES * 60:
         log("Release window already passed — exiting.")
@@ -388,8 +387,11 @@ def main() -> None:
             dismiss_cookie_banner(page)
         else:
             login(page)
-            # Only during the pre-release wait — never in the booking race.
-            if not WAIT_FOR_RELEASE or seconds_to_release() > 90:
+            # Skip the bookings check only in the last seconds before release
+            # (never eat into the booking race). A run that starts after
+            # release — e.g. a delayed backup run — must still check, so it
+            # can't double-book what the primary run just grabbed.
+            if not WAIT_FOR_RELEASE or not (0 <= seconds_to_release() <= 90):
                 already_booked = booked_dates(page)
 
         target = expected_target()
