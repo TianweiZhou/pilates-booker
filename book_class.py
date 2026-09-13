@@ -120,16 +120,34 @@ def login(page) -> None:
     page.wait_for_timeout(3000)
     dismiss_cookie_banner(page)
 
-    login_link = page.get_by_text(re.compile(r"^\s*Log ?in\s*$", re.I)).first
-    try:
-        login_link.click(timeout=8000)
-    except PWTimeout:
+    # The page has several "Log in" texts (header, booking widget); try each
+    # until the login modal's email field actually appears.
+    links = page.get_by_text(re.compile(r"^\s*Log ?in\s*$", re.I))
+    count = links.count()
+    if count == 0:
         shot(page, "no-login-link")
-        raise RuntimeError("Could not find the 'Log in' link — maybe already "
-                           "logged in, or the page layout changed.")
+        log(f"DIAG: url={page.url!r} title={page.title()!r}")
+        log(f"DIAG: page text: {page.locator('body').inner_text()[:600]!r}")
+        raise RuntimeError("Could not find any 'Log in' link — maybe already "
+                           "logged in, blocked, or the page layout changed.")
 
     email_box = page.locator('input[type="email"]').first
-    email_box.wait_for(state="visible", timeout=15000)
+    opened = False
+    for i in range(min(count, 3)):
+        try:
+            links.nth(i).click(timeout=8000)
+            email_box.wait_for(state="visible", timeout=8000)
+            opened = True
+            break
+        except PWTimeout:
+            log(f"Login link #{i + 1} of {count} didn't open the modal…")
+    if not opened:
+        shot(page, "login-modal-missing")
+        log(f"DIAG: url={page.url!r} title={page.title()!r}")
+        log(f"DIAG: page text: {page.locator('body').inner_text()[:600]!r}")
+        raise RuntimeError("The login modal never appeared — the site may be "
+                           "blocking this runner. See the screenshot artifact.")
+
     email_box.fill(EMAIL)
     page.locator('input[type="password"]').first.fill(PASSWORD)
     shot(page, "login-filled")
@@ -375,8 +393,15 @@ def main() -> None:
         sys.exit("Set PILATES_EMAIL and PILATES_PASSWORD.")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS)
-        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        # Full Chromium (new headless) rather than the stripped headless
+        # shell — closer to a regular browser, fewer site compatibility gaps.
+        try:
+            browser = p.chromium.launch(headless=HEADLESS, channel="chromium")
+        except Exception:
+            browser = p.chromium.launch(headless=HEADLESS)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000},
+                                locale="en-CA",
+                                timezone_id="America/Toronto")
         page.set_default_timeout(20000)
 
         already_booked = set()
