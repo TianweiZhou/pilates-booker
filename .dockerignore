@@ -1,0 +1,11 @@
+.git
+.venv
+venv*
+__pycache__
+*.pyc
+screenshots/
+.env
+.env.example
+.github/
+README.md
+deploy/

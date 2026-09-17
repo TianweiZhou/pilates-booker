@@ -1,0 +1,6 @@
+# Extra dependency needed only inside the Lambda container image.
+# Playwright itself comes pre-installed (with matching Chromium) in the
+# mcr.microsoft.com/playwright/python base image — do not pip-install it
+# here, that would fetch a possibly different version than the browser
+# binaries already baked into the image.
+awslambdaric==2.2.1

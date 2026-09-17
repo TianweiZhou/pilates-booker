@@ -23,8 +23,10 @@ Configuration (environment variables):
   MAX_POLL_MINUTES   how long to keep retrying after 11:00 (default: 20)
   LOOKAHEAD_DAYS     how far ahead to look for Saturdays (default: 45)
   HEADLESS           "false" to watch the browser     (default: true)
+  SCREENSHOT_DIR     where to save screenshots  (default: ./screenshots;
+                      the Lambda Dockerfile sets this to /tmp/screenshots)
 
-Screenshots are written to ./screenshots for every run.
+Screenshots are written to SCREENSHOT_DIR for every run.
 """
 
 import os
@@ -64,8 +66,9 @@ RELEASE_HOUR, RELEASE_MINUTE = 11, 0
 # Only bail out if we somehow start earlier than this before release.
 MAX_EARLY_MINUTES = int(os.environ.get("MAX_EARLY_MINUTES", "300"))
 
-SHOTS = Path("screenshots")
-SHOTS.mkdir(exist_ok=True)
+# /var/task is read-only on AWS Lambda; the Dockerfile points this at /tmp.
+SHOTS = Path(os.environ.get("SCREENSHOT_DIR", "screenshots"))
+SHOTS.mkdir(parents=True, exist_ok=True)
 
 
 def log(msg: str) -> None:
@@ -395,10 +398,16 @@ def main() -> None:
     with sync_playwright() as p:
         # Full Chromium (new headless) rather than the stripped headless
         # shell — closer to a regular browser, fewer site compatibility gaps.
+        # --no-sandbox/--disable-dev-shm-usage are required in Lambda's
+        # restricted container (no CAP_SYS_ADMIN, tiny /dev/shm) and are
+        # harmless everywhere else (GitHub Actions, local runs).
+        launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
+                       "--disable-gpu"]
         try:
-            browser = p.chromium.launch(headless=HEADLESS, channel="chromium")
+            browser = p.chromium.launch(headless=HEADLESS, channel="chromium",
+                                        args=launch_args)
         except Exception:
-            browser = p.chromium.launch(headless=HEADLESS)
+            browser = p.chromium.launch(headless=HEADLESS, args=launch_args)
         page = browser.new_page(viewport={"width": 1440, "height": 1000},
                                 locale="en-CA",
                                 timezone_id="America/Toronto")
