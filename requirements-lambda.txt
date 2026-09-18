@@ -10,3 +10,7 @@
 # image); it only (re)installs the Python API package.
 playwright==1.62.0
 awslambdaric==2.2.1
+# Python's zoneinfo module needs the IANA timezone database; this image
+# doesn't ship it at the OS level, so ZoneInfo("America/Toronto") fails
+# without this pure-Python fallback copy of the same database.
+tzdata
