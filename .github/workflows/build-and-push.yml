@@ -1,0 +1,55 @@
+name: Build and push Lambda image to ECR
+
+# Builds the Playwright/Lambda container image and pushes it to ECR
+# whenever the image-relevant files change on main, or on demand.
+# Uses OIDC to assume an AWS role — no AWS keys stored in GitHub at all.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "book_class.py"
+      - "lambda_handler.py"
+      - "requirements-lambda.txt"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/build-and-push.yml"
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write   # required to request the OIDC token
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: pilates-booker
+  AWS_ACCOUNT_ID: "329638939035"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ env.AWS_ACCOUNT_ID }}:role/github-actions-pilates-booker
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
+          docker tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+      - name: Summary
+        run: |
+          echo "Pushed: $ECR_REPOSITORY:${{ github.sha }} and :latest" >> "$GITHUB_STEP_SUMMARY"
