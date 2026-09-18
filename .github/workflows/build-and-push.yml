@@ -23,6 +23,7 @@ env:
   AWS_REGION: us-east-1
   ECR_REPOSITORY: pilates-booker
   AWS_ACCOUNT_ID: "329638939035"
+  LAMBDA_FUNCTION_NAME: pilates-booker
 
 jobs:
   build-and-push:
@@ -50,6 +51,25 @@ jobs:
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
 
+      - name: Deploy new image to Lambda
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          # Point Lambda at the immutable git-SHA tag, not the mutable
+          # :latest tag — avoids any ambiguity about which exact image
+          # Lambda ends up running.
+          aws lambda update-function-code \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --image-uri "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" \
+            --region "$AWS_REGION" >/dev/null
+          aws lambda wait function-updated \
+            --function-name "$LAMBDA_FUNCTION_NAME" \
+            --region "$AWS_REGION"
+
       - name: Summary
         run: |
-          echo "Pushed: $ECR_REPOSITORY:${{ github.sha }} and :latest" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "Pushed: $ECR_REPOSITORY:${{ github.sha }} and :latest"
+            echo "Deployed to Lambda function: $LAMBDA_FUNCTION_NAME"
+          } >> "$GITHUB_STEP_SUMMARY"
