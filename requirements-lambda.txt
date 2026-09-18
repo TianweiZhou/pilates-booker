@@ -1,6 +1,12 @@
-# Extra dependency needed only inside the Lambda container image.
-# Playwright itself comes pre-installed (with matching Chromium) in the
-# mcr.microsoft.com/playwright/python base image — do not pip-install it
-# here, that would fetch a possibly different version than the browser
-# binaries already baked into the image.
+# Extra dependencies needed only inside the Lambda container image.
+#
+# The mcr.microsoft.com/playwright/python base image pre-downloads the
+# matching Chromium browser binaries, but does NOT reliably leave the
+# `playwright` Python package importable from wherever AWS's Lambda Runtime
+# Interface Client ends up running Python — pin it explicitly here, at the
+# exact version matching the Dockerfile's base image tag, so it's guaranteed
+# installed into the same environment the handler actually runs in. This
+# does not re-download the browser binaries (those come from the base
+# image); it only (re)installs the Python API package.
+playwright==1.62.0
 awslambdaric==2.2.1
