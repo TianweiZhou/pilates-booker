@@ -1,15 +1,11 @@
 name: Book Saturday Pilates class
 
 on:
-  schedule:
-    # GitHub cron fires late — sometimes by 60-90+ minutes — so start hours
-    # early and let the script sleep until exactly 11:00 a.m. Toronto time.
-    #   12:30 UTC = 8:30 EDT / 7:30 EST
-    #   13:30 UTC = 9:30 EDT / 8:30 EST  (staggered backup)
-    # The concurrency group serializes them: the backup starts only after the
-    # primary finishes, sees the date already booked, and exits.
-    - cron: "30 12 * * 4"
-    - cron: "30 13 * * 4"
+  # Superseded by the AWS Lambda + EventBridge Scheduler setup (see
+  # README.md "Running on AWS") — GitHub's free-tier cron fired 60-90+
+  # minutes late too often to be reliable for a class that fills in ~1
+  # minute. Kept here, manual-trigger only, as an emergency fallback if
+  # the AWS side ever has an outage.
   workflow_dispatch:
     inputs:
       dry_run:
