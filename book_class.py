@@ -120,36 +120,52 @@ def login(page) -> None:
     """Open the member login modal from the calendar page and sign in."""
     log("Logging in…")
     page.goto(SERVICE_URL, wait_until="domcontentloaded")
-    page.wait_for_timeout(3000)
-    dismiss_cookie_banner(page)
 
-    # The page has several "Log in" texts (header, booking widget); try each
-    # until the login modal's email field actually appears.
-    links = page.get_by_text(re.compile(r"^\s*Log ?in\s*$", re.I))
-    count = links.count()
-    if count == 0:
-        shot(page, "no-login-link")
-        log(f"DIAG: url={page.url!r} title={page.title()!r}")
-        log(f"DIAG: page text: {page.locator('body').inner_text()[:600]!r}")
-        raise RuntimeError("Could not find any 'Log in' link — maybe already "
-                           "logged in, blocked, or the page layout changed.")
+    # Wix hydrates the booking widget well after DOMContentLoaded — much
+    # later on Lambda's slower single-process Chromium. Clicking "Log in"
+    # before the site's JS is ready silently does nothing, so wait for the
+    # widget's own "Already a member? Log in" link as the readiness signal.
+    try:
+        page.get_by_text(re.compile(r"Already a member", re.I)).first \
+            .wait_for(state="visible", timeout=30000)
+    except PWTimeout:
+        log("Booking widget's member link didn't appear within 30s — "
+            "trying the header link anyway.")
+    page.wait_for_timeout(1500)
+    dismiss_cookie_banner(page)
+    hide_chat_widget(page)  # it overlaps the widget's right-hand column
 
     email_box = page.locator('input[type="email"]').first
+    login_re = re.compile(r"^\s*Log ?in\s*$", re.I)
     opened = False
-    for i in range(min(count, 3)):
-        try:
-            links.nth(i).click(timeout=8000)
-            email_box.wait_for(state="visible", timeout=8000)
-            opened = True
-            break
-        except PWTimeout:
-            log(f"Login link #{i + 1} of {count} didn't open the modal…")
+    deadline = time.time() + 90
+    attempt = 0
+    while not opened and time.time() < deadline:
+        attempt += 1
+        links = page.get_by_text(login_re)
+        count = links.count()
+        if count == 0:
+            page.wait_for_timeout(2000)
+            continue
+        # Prefer the booking widget's link (last in DOM order) over the
+        # site header's members-bar button.
+        for i in reversed(range(min(count, 3))):
+            try:
+                links.nth(i).click(timeout=8000)
+                email_box.wait_for(state="visible", timeout=10000)
+                opened = True
+                break
+            except PWTimeout:
+                log(f"Attempt {attempt}: login link #{i + 1} of {count} "
+                    "didn't open the modal…")
+        if not opened:
+            page.wait_for_timeout(2000)
     if not opened:
         shot(page, "login-modal-missing")
         log(f"DIAG: url={page.url!r} title={page.title()!r}")
         log(f"DIAG: page text: {page.locator('body').inner_text()[:600]!r}")
-        raise RuntimeError("The login modal never appeared — the site may be "
-                           "blocking this runner. See the screenshot artifact.")
+        raise RuntimeError("The login modal never appeared after 90s of "
+                           "retries — see the DIAG lines above.")
 
     email_box.fill(EMAIL)
     page.locator('input[type="password"]').first.fill(PASSWORD)
@@ -233,7 +249,14 @@ def open_slot_for(page, d: datetime):
         day_btn.click(timeout=4000)
     except PWTimeout:
         return None
-    page.wait_for_timeout(1200)
+    # Wait for the availability panel to actually switch to this date
+    # (a fixed short sleep isn't enough on Lambda's slower Chromium).
+    try:
+        page.get_by_text(re.compile(rf"Availability for {d:%A}, {d:%B} {d.day}\b")) \
+            .first.wait_for(state="visible", timeout=8000)
+    except PWTimeout:
+        pass
+    page.wait_for_timeout(500)
 
     body = page.locator("body").inner_text()
     if "No availability" in body:
@@ -270,7 +293,10 @@ def booked_dates(page) -> set:
             has=page.locator("img")).first.click(timeout=8000)
         item = page.get_by_role("menuitem", name=re.compile("My Bookings", re.I))
         item.first.click(timeout=8000)
-        page.wait_for_timeout(5000)
+        # Wait for the bookings list itself, not a fixed delay.
+        page.get_by_text(re.compile(r"Manage your bookings|Upcoming", re.I)) \
+            .first.wait_for(state="visible", timeout=20000)
+        page.wait_for_timeout(2000)
         body = page.locator("body").inner_text()
         for month, day, year in re.findall(
                 rf"({'|'.join(MONTHS)}) (\d{{1,2}}), (\d{{4}}), \d", body):
@@ -308,7 +334,13 @@ def seconds_to_release() -> float:
 
 def complete_booking(page) -> None:
     """From the booking form: waiver + plan payment + final book click."""
-    page.wait_for_timeout(2500)
+    # Wait for the form to render rather than sleeping a fixed 2.5s.
+    try:
+        page.get_by_text(re.compile(r"Booking Details|Client Details", re.I)) \
+            .first.wait_for(state="visible", timeout=20000)
+    except PWTimeout:
+        pass
+    page.wait_for_timeout(1000)
     hide_chat_widget(page)
     shot(page, "booking-form")
 
