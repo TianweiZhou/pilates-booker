@@ -16,6 +16,11 @@ COPY book_class.py lambda_handler.py ./
 
 # /var/task is read-only at runtime; screenshots must go to /tmp instead.
 ENV SCREENSHOT_DIR=/tmp/screenshots
+# Chromium wants a writable home directory for its profile/cache — /tmp is
+# the only writable filesystem in a Lambda container.
+ENV HOME=/tmp
+ENV XDG_CONFIG_HOME=/tmp/.config
+ENV XDG_CACHE_HOME=/tmp/.cache
 
 ENTRYPOINT ["python", "-m", "awslambdaric"]
 CMD ["lambda_handler.handler"]

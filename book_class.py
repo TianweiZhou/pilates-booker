@@ -398,11 +398,23 @@ def main() -> None:
     with sync_playwright() as p:
         # Full Chromium (new headless) rather than the stripped headless
         # shell — closer to a regular browser, fewer site compatibility gaps.
-        # --no-sandbox/--disable-dev-shm-usage are required in Lambda's
-        # restricted container (no CAP_SYS_ADMIN, tiny /dev/shm) and are
-        # harmless everywhere else (GitHub Actions, local runs).
-        launch_args = ["--no-sandbox", "--disable-dev-shm-usage",
-                       "--disable-gpu"]
+        #
+        # The extra flags below are the standard, widely-documented
+        # workaround for running full Chromium inside AWS Lambda's
+        # restricted container (no CAP_SYS_ADMIN, tiny/no /dev/shm, and
+        # process-spawning restrictions that break Chromium's normal
+        # multi-process model — surfaces as "Target crashed" on new_page
+        # without them). All are harmless in normal environments too
+        # (GitHub Actions, local runs), so we always pass the full set.
+        launch_args = [
+            "--no-sandbox",
+            "--disable-setuid-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--disable-software-rasterizer",
+            "--single-process",   # Lambda can't support Chromium's normal
+            "--no-zygote",        # multi-process model; run it as one.
+        ]
         try:
             browser = p.chromium.launch(headless=HEADLESS, channel="chromium",
                                         args=launch_args)
