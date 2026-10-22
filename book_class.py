@@ -2,11 +2,12 @@
 """
 Auto-book the "Reformer Group (lvl3-Inter./Chinese)" class at Neutral Pilates.
 
-The studio releases the Saturday 11:00 a.m. class every Thursday at 11:00 a.m.
-Eastern (America/Toronto). This script:
+The studio releases the Saturday 11:00 a.m. class every Thursday at
+RELEASE_HOUR (12:00 noon in winter, 11:00 a.m. in summer) Eastern
+(America/Toronto). This script:
 
   1. Logs in with your member account (email + password).
-  2. Waits until exactly 11:00:00 ET (skipped with WAIT_FOR_RELEASE=false).
+  2. Waits until exactly RELEASE_HOUR:00 ET (skipped with WAIT_FOR_RELEASE=false).
   3. Scans the booking calendar for the FARTHEST-out Saturday with an open
      11:00 a.m. slot (i.e. the newly released class) and books it using your
      existing class package/plan.
@@ -18,9 +19,11 @@ Configuration (environment variables):
   PILATES_EMAIL      member account email            (required)
   PILATES_PASSWORD   member account password         (required)
   SERVICE_URL        booking calendar URL            (default: the lvl3 Chinese class)
-  WAIT_FOR_RELEASE   "true" = wait for Thu 11:00 ET  (default: true)
+  RELEASE_HOUR       Thursday booking-open hour, ET   (default: 12)
+  RELEASE_MINUTE     minute of that hour              (default: 0)
+  WAIT_FOR_RELEASE   "true" = wait for the release time (default: true)
   DRY_RUN            "true" = do everything except the final booking click
-  MAX_POLL_MINUTES   how long to keep retrying after 11:00 (default: 20)
+  MAX_POLL_MINUTES   how long to keep retrying after release (default: 20)
   LOOKAHEAD_DAYS     how far ahead to look for Saturdays (default: 45)
   HEADLESS           "false" to watch the browser     (default: true)
   SCREENSHOT_DIR     where to save screenshots  (default: ./screenshots;
@@ -61,7 +64,11 @@ FALLBACK_SCAN_AFTER = int(os.environ.get("FALLBACK_SCAN_AFTER", "180"))
 LOOKAHEAD_DAYS = int(os.environ.get("LOOKAHEAD_DAYS", "45"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
-RELEASE_HOUR, RELEASE_MINUTE = 11, 0
+# When the studio opens booking on Thursdays (America/Toronto). Moved from
+# 11:00 to 12:00 for winter; set RELEASE_HOUR=11 on the Lambda to switch back
+# without a redeploy. This is the *release* time, not the class's own time.
+RELEASE_HOUR = int(os.environ.get("RELEASE_HOUR", "12"))
+RELEASE_MINUTE = int(os.environ.get("RELEASE_MINUTE", "0"))
 # GitHub cron fires unpredictably late, so runs start hours early and sleep.
 # Only bail out if we somehow start earlier than this before release.
 MAX_EARLY_MINUTES = int(os.environ.get("MAX_EARLY_MINUTES", "300"))

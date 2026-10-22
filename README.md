@@ -1,8 +1,8 @@
 # Pilates Booker
 
 A serverless bot that wins a race no human can: a Pilates studio releases each
-Saturday class every Thursday at 11:00:00 a.m. sharp, and the popular slot
-fills in **about a minute**. This project logs in, waits for the exact
+Saturday class every Thursday on the dot (11:00 a.m. in summer, 12:00 noon
+in winter), and the popular slot fills in **about a minute**. This project logs in, waits for the exact
 release moment, and books the class automatically — running unattended on
 AWS, redeploying itself on every code change, and reporting its own failures.
 
@@ -52,9 +52,14 @@ flowchart LR
     E -->|on failure| K["GitHub Issue<br/>auto-filed"]
 ```
 
-Two schedules fire three minutes apart (10:55 and 10:58 a.m.) as a primary
-and a backup — the second one checks the account's existing bookings before
-doing anything, so if the primary already succeeded, it just exits.
+Two schedules fire five and two minutes before the release (11:55 and 11:58
+a.m. in winter; 10:55 and 10:58 a.m. in summer) as a primary and a backup —
+the second one checks the account's existing bookings before doing anything,
+so if the primary already succeeded, it just exits.
+
+The release hour is the `RELEASE_HOUR` environment variable (default `12`).
+When the studio switches seasons, update that variable on the Lambda and the
+two schedule cron hours — no code change or redeploy needed.
 
 ## Design decisions — why it's built this way
 

@@ -13,7 +13,7 @@ on:
         type: boolean
         default: true
       wait_for_release:
-        description: "Wait for Thursday 11:00 ET before booking"
+        description: "Wait for the Thursday release time (RELEASE_HOUR, default 12:00 ET) before booking"
         type: boolean
         default: false
 
