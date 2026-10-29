@@ -246,24 +246,51 @@ def goto_month(page, target: datetime) -> bool:
     return False
 
 
-def open_slot_for(page, d: datetime):
-    """Select date `d`; return the clickable open 11:00 slot or None."""
-    if not goto_month(page, d):
-        return None
+def _select_day(page, d: datetime) -> bool:
+    """Click date `d` and wait until the availability panel shows it."""
     day_btn = page.get_by_role("button",
                                name=re.compile(re.escape(day_label(d)))).first
     try:
         day_btn.click(timeout=4000)
     except PWTimeout:
-        return None
-    # Wait for the availability panel to actually switch to this date
-    # (a fixed short sleep isn't enough on Lambda's slower Chromium).
+        return False
+    # Wait for the panel to actually switch to this date (a fixed short
+    # sleep isn't enough on Lambda's slower Chromium).
     try:
         page.get_by_text(re.compile(rf"Availability for {d:%A}, {d:%B} {d.day}\b")) \
             .first.wait_for(state="visible", timeout=8000)
     except PWTimeout:
         pass
-    page.wait_for_timeout(500)
+    page.wait_for_timeout(300)
+    return True
+
+
+def prepare_calendar(page, d: datetime) -> None:
+    """Load the booking page and park the calendar on `d`'s month, so the
+    race itself is only a couple of cheap date clicks."""
+    page.goto(SERVICE_URL, wait_until="domcontentloaded")
+    try:
+        page.get_by_text("Select a Date and Time").first \
+            .wait_for(state="visible", timeout=30000)
+    except PWTimeout:
+        log("Calendar slow to render — continuing anyway.")
+    page.wait_for_timeout(1000)
+    hide_chat_widget(page)
+    goto_month(page, d)
+
+
+def open_slot_for(page, d: datetime, refresh: bool = False):
+    """Select date `d`; return the clickable open 11:00 slot or None."""
+    if not goto_month(page, d):
+        return None
+    if refresh:
+        # Every date click makes the site fetch fresh availability from its
+        # API (~1s), so flipping to a neighbouring day and back re-checks
+        # the slot without the 30s+ full page reload that cost us the race.
+        neighbour = d + timedelta(days=-1 if d.day > 1 else 1)
+        _select_day(page, neighbour)
+    if not _select_day(page, d):
+        return None
 
     body = page.locator("body").inner_text()
     if "No availability" in body:
@@ -303,7 +330,7 @@ def booked_dates(page) -> set:
         item.first.click(timeout=8000)
         # Wait for the bookings list itself, not a fixed delay.
         page.get_by_text(re.compile(r"Manage your bookings|Upcoming", re.I)) \
-            .first.wait_for(state="visible", timeout=20000)
+            .first.wait_for(state="visible", timeout=45000)
         page.wait_for_timeout(2000)
         body = page.locator("body").inner_text()
         for month, day, year in re.findall(
@@ -489,6 +516,10 @@ def main() -> None:
         log(f"Target: {target:%A %B %d, %Y} at 11:00 a.m. "
             f"(fallback scan after {FALLBACK_SCAN_AFTER}s)")
 
+        # Do all the slow page work now, while there is still time, so the
+        # moment the studio opens booking we only need quick date clicks.
+        prepare_calendar(page, target)
+
         if WAIT_FOR_RELEASE:
             wait_until_release()
 
@@ -496,20 +527,27 @@ def main() -> None:
         deadline = start + MAX_POLL_MINUTES * 60
         fallback_at = start + FALLBACK_SCAN_AFTER
         attempt = 0
+        need_reload = False
         while True:
             attempt += 1
-            page.goto(SERVICE_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(1500)
-            hide_chat_widget(page)
-
             slot, chosen = None, None
             if time.time() < fallback_at:
-                # Fast path: check only the expected release date.
-                slot, chosen = open_slot_for(page, target), target
+                # Fast path: re-check only the expected release date,
+                # without reloading the page unless something went wrong.
+                try:
+                    if need_reload or attempt % 40 == 0:
+                        prepare_calendar(page, target)
+                        need_reload = False
+                    slot, chosen = open_slot_for(page, target, refresh=True), target
+                except Exception as e:
+                    log(f"Poll {attempt} hit an error ({type(e).__name__}) — "
+                        "will reload the page.")
+                    need_reload = True
                 log(f"Poll {attempt}: {target:%b %d} 11:00 slot "
                     f"{'OPEN' if slot else 'not open'}")
             else:
                 # Fallback: scan every unbooked Saturday, farthest first.
+                prepare_calendar(page, target)
                 log(f"Attempt {attempt}: expected date not open — full scan.")
                 for sat in candidate_saturdays():
                     if (sat.year, sat.month, sat.day) in already_booked:
@@ -545,7 +583,7 @@ def main() -> None:
                     f"{MAX_POLL_MINUTES} minutes. Screenshot saved.")
             if attempt % 10 == 0:
                 log(f"Attempt {attempt}: not open yet, still retrying…")
-            time.sleep(2)
+            time.sleep(0.3 if time.time() < fallback_at else 2)
 
         browser.close()
 
