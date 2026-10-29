@@ -20,30 +20,43 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "TianweiZhou/pilates-booker")
 
 
+def _github(path: str, payload: dict | None = None):
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{GITHUB_REPO}{path}",
+        data=json.dumps(payload).encode() if payload is not None else None,
+        headers={
+            "Authorization": f"Bearer {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "pilates-booker-lambda",
+        },
+        method="POST" if payload is not None else "GET",
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
 def _file_github_issue(title: str, body: str) -> None:
+    """Open an issue, or comment on today's if one is already open — the
+    primary run, the backup run, and Lambda's own async retries would
+    otherwise each file a duplicate for the same failure."""
     if not GITHUB_TOKEN:
         print("GITHUB_TOKEN not set — skipping auto-filed GitHub issue.")
         return
     try:
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{GITHUB_REPO}/issues",
-            data=json.dumps({
-                "title": title,
-                "body": body,
-                "labels": ["auto-filed", "lambda-failure"],
-            }).encode(),
-            headers={
-                "Authorization": f"Bearer {GITHUB_TOKEN}",
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-                "Content-Type": "application/json",
-                "User-Agent": "pilates-booker-lambda",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            url = json.loads(resp.read()).get("html_url")
-            print(f"Filed GitHub issue ({resp.status}): {url}")
+        open_issues = _github("/issues?state=open&labels=lambda-failure&per_page=50")
+        existing = next((i for i in open_issues if i["title"] == title), None)
+        if existing:
+            _github(f"/issues/{existing['number']}/comments", {"body": body})
+            print(f"Commented on existing GitHub issue: {existing['html_url']}")
+            return
+        issue = _github("/issues", {
+            "title": title,
+            "body": body,
+            "labels": ["auto-filed", "lambda-failure"],
+        })
+        print(f"Filed GitHub issue: {issue.get('html_url')}")
     except Exception as e:
         detail = e.read().decode() if isinstance(e, urllib.error.HTTPError) else str(e)
         print(f"Could not file GitHub issue: {detail}")

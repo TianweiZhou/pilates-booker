@@ -271,19 +271,20 @@ def open_slot_for(page, d: datetime):
 
     # Open slots render as a selectable chip named like "11:00 a.m.".
     # Closed ones are named "The 11:00 a.m. slot is closed for booking".
-    slot = page.get_by_role("checkbox",
-                            name=re.compile(r"^11:00", re.I)).first
-    try:
-        if slot.is_visible(timeout=2000):
-            return slot
-    except Exception:
-        pass
-    slot = page.get_by_role("radio", name=re.compile(r"^11:00", re.I)).first
-    try:
-        if slot.is_visible(timeout=1000):
-            return slot
-    except Exception:
-        pass
+    # A full class is labelled "11:00 a.m. Waitlist" and its button becomes
+    # "Join Waitlist" (no "Next"), so it must not count as open.
+    for role in ("checkbox", "radio"):
+        slot = page.get_by_role(role, name=re.compile(r"^11:00", re.I)).first
+        try:
+            if not slot.is_visible():
+                continue
+            label = slot.get_attribute("aria-label") or ""
+        except Exception:
+            continue
+        if re.search(r"wait\s*list", label, re.I):
+            log(f"{d:%b %d}: 11:00 slot is waitlist-only (class is full).")
+            return None
+        return slot
     return None
 
 
@@ -505,6 +506,8 @@ def main() -> None:
             if time.time() < fallback_at:
                 # Fast path: check only the expected release date.
                 slot, chosen = open_slot_for(page, target), target
+                log(f"Poll {attempt}: {target:%b %d} 11:00 slot "
+                    f"{'OPEN' if slot else 'not open'}")
             else:
                 # Fallback: scan every unbooked Saturday, farthest first.
                 log(f"Attempt {attempt}: expected date not open — full scan.")
