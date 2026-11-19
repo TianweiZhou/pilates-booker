@@ -46,10 +46,17 @@ jobs:
           ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker build -t "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" .
-          docker tag "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          docker push "$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+          # Lambda only accepts a single-platform, single-manifest image.
+          # Newer Docker defaults to an OCI image index with provenance/SBOM
+          # attestation entries, which Lambda rejects ("image manifest ...
+          # media type ... is not supported"), so turn those off and push
+          # Docker v2 media types directly.
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --output "type=image,\"name=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG,$ECR_REGISTRY/$ECR_REPOSITORY:latest\",push=true,oci-mediatypes=false" \
+            .
 
       - name: Deploy new image to Lambda
         env:
