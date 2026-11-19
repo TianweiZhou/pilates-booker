@@ -26,7 +26,8 @@ Configuration (environment variables):
   MAX_POLL_MINUTES   how long to keep retrying after release (default: 3)
   LOOKAHEAD_DAYS     how far ahead to look for Saturdays (default: 45)
   HEADLESS           "false" to watch the browser     (default: true)
-  SKIP_DATES         no-class Saturdays, e.g. "2026-12-26,2027-01-02"
+  SKIP_DATES         no-class Saturdays: YYYY-MM-DD once, MM-DD yearly
+                      (e.g. "2027-01-02,01-01"; Dec 26 is always skipped)
   SCREENSHOT_DIR     where to save screenshots  (default: ./screenshots;
                       the Lambda Dockerfile sets this to /tmp/screenshots)
 
@@ -64,10 +65,12 @@ TARGET_OFFSET_DAYS = int(os.environ.get("TARGET_OFFSET_DAYS", "30"))
 FALLBACK_SCAN_AFTER = int(os.environ.get("FALLBACK_SCAN_AFTER", "180"))
 LOOKAHEAD_DAYS = int(os.environ.get("LOOKAHEAD_DAYS", "45"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
-# Saturdays with no class (holidays), comma-separated YYYY-MM-DD. If the
-# Thursday's target date is listed, the run exits without doing anything.
+# Saturdays with no class, comma-separated: YYYY-MM-DD for a one-off date
+# or MM-DD for every year. If the Thursday's target date matches, the run
+# exits without doing anything. Dec 26 never has a class, so it is built in.
+YEARLY_NO_CLASS = {"12-26"}
 SKIP_DATES = {d.strip() for d in os.environ.get("SKIP_DATES", "").split(",")
-              if d.strip()}
+              if d.strip()} | YEARLY_NO_CLASS
 
 # When the studio opens booking on Thursdays (America/Toronto). Override
 # with the RELEASE_HOUR env var if the studio changes it. This is the
@@ -491,7 +494,7 @@ def complete_booking(page, t_seen: float) -> None:
 # ------------------------------------------------------------------- main ---
 def main() -> None:
     target = expected_target()
-    if f"{target:%Y-%m-%d}" in SKIP_DATES:
+    if f"{target:%Y-%m-%d}" in SKIP_DATES or f"{target:%m-%d}" in SKIP_DATES:
         log(f"{target:%A %B %d} is in SKIP_DATES (no class) — nothing to do.")
         return
     if not SKIP_LOGIN and (not EMAIL or not PASSWORD):
