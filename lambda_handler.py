@@ -2,10 +2,11 @@
 Lambda function triggered by an EventBridge Scheduler schedule.
 
 Everything book_class.py already logs with print()/log() lands in
-CloudWatch Logs automatically. On a real failure, this also files a
-GitHub Issue with the error details (best-effort — never lets a problem
-filing the issue mask or replace the real error), so a failed run is easy
-to find and fix without digging through CloudWatch first.
+CloudWatch Logs automatically. After each run, the run's screenshots are
+uploaded to S3 (SCREENSHOT_BUCKET), since the Lambda's /tmp is discarded.
+On a real failure, this also files a GitHub Issue with the error details
+and the screenshots' S3 location (best-effort — never lets a problem
+filing the issue or uploading mask or replace the real error).
 """
 import json
 import os
@@ -19,6 +20,35 @@ import book_class
 
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "TianweiZhou/pilates-booker")
+SCREENSHOT_BUCKET = os.environ.get("SCREENSHOT_BUCKET", "")
+
+
+def _clear_screenshots() -> None:
+    # A warm Lambda reuses /tmp, so drop the previous run's screenshots.
+    for f in book_class.SHOTS.glob("*.png"):
+        f.unlink(missing_ok=True)
+
+
+def _upload_screenshots(request_id: str) -> str:
+    """Upload this run's screenshots; return a link to them, or ''."""
+    files = sorted(book_class.SHOTS.glob("*.png"))
+    if not SCREENSHOT_BUCKET or not files:
+        return ""
+    try:
+        import boto3
+        prefix = f"{datetime.now(book_class.TZ):%Y-%m-%d}/{request_id}/"
+        s3 = boto3.client("s3")
+        for f in files:
+            s3.upload_file(str(f), SCREENSHOT_BUCKET, prefix + f.name,
+                           ExtraArgs={"ContentType": "image/png"})
+        url = (f"https://s3.console.aws.amazon.com/s3/buckets/"
+               f"{SCREENSHOT_BUCKET}?region=us-east-1&prefix={prefix}")
+        print(f"Uploaded {len(files)} screenshot(s) to "
+              f"s3://{SCREENSHOT_BUCKET}/{prefix} — {url}")
+        return url
+    except Exception as e:
+        print(f"Could not upload screenshots: {e}")
+        return ""
 
 
 def _github(path: str, payload: dict | None = None):
@@ -63,11 +93,14 @@ def _file_github_issue(title: str, body: str) -> None:
         print(f"Could not file GitHub issue: {detail}")
 
 
-def _issue_body(detail: str, request_id: str) -> str:
+def _issue_body(detail: str, request_id: str, shots_url: str = "") -> str:
     when = datetime.now(book_class.TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    shots = (f"**Screenshots:** {shots_url} (kept for 7 days)\n"
+             if shots_url else "")
     return (
         f"**When:** {when}\n"
-        f"**Request ID:** `{request_id}`\n\n"
+        f"**Request ID:** `{request_id}`\n"
+        f"{shots}\n"
         f"```\n{detail}\n```\n\n"
         f"Check CloudWatch Logs (`/aws/lambda/pilates-booker`) for this "
         f"request ID for the full DIAG output — page URL, title, and "
@@ -88,11 +121,13 @@ def _start_timeout_watchdog(context, request_id: str):
     seconds_left = get_remaining() / 1000 - 30
     if seconds_left <= 0:
         return None
-    timer = threading.Timer(seconds_left, lambda: _file_github_issue(
-        _issue_title(),
-        _issue_body("The run was still going 30s before the Lambda timeout "
-                    "and is about to be killed — no booking was made.",
-                    request_id)))
+    def on_timeout():
+        _file_github_issue(_issue_title(), _issue_body(
+            "The run was still going 30s before the Lambda timeout and is "
+            "about to be killed — no booking was made.",
+            request_id, _upload_screenshots(request_id)))
+
+    timer = threading.Timer(seconds_left, on_timeout)
     timer.daemon = True
     timer.start()
     return timer
@@ -100,6 +135,7 @@ def _start_timeout_watchdog(context, request_id: str):
 
 def handler(event, context):
     request_id = getattr(context, "aws_request_id", "unknown")
+    _clear_screenshots()
     watchdog = _start_timeout_watchdog(context, request_id)
     try:
         return _run(request_id)
@@ -111,6 +147,7 @@ def handler(event, context):
 def _run(request_id: str):
     try:
         book_class.main()
+        _upload_screenshots(request_id)
         return {"ok": True}
     except SystemExit as e:
         # book_class.py calls sys.exit(0) for boring, successful outcomes
@@ -119,17 +156,14 @@ def _run(request_id: str):
         code = e.code or 0
         if code != 0:
             msg = f"book_class.main() exited with code {code}"
-            _file_github_issue(
-                _issue_title(),
-                _issue_body(msg, request_id),
-            )
+            _file_github_issue(_issue_title(), _issue_body(
+                msg, request_id, _upload_screenshots(request_id)))
             raise RuntimeError(msg)
+        _upload_screenshots(request_id)
         return {"ok": True, "note": "exited early — see logs for the reason"}
     except Exception:
         tb = traceback.format_exc()
         traceback.print_exc()
-        _file_github_issue(
-            _issue_title(),
-            _issue_body(tb, request_id),
-        )
+        _file_github_issue(_issue_title(), _issue_body(
+            tb, request_id, _upload_screenshots(request_id)))
         raise

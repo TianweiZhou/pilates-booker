@@ -530,133 +530,151 @@ def main() -> None:
                                 timezone_id="America/Toronto")
         page.set_default_timeout(20000)
 
-        already_booked = set()
-        if SKIP_LOGIN:
-            log("SKIP_LOGIN=true — testing without an account.")
-            page.goto(SERVICE_URL, wait_until="domcontentloaded")
-            page.wait_for_timeout(3000)
-            dismiss_cookie_banner(page)
-        else:
-            login(page)
-            # Skip the bookings check only in the last seconds before release
-            # (never eat into the booking race). A run that starts after
-            # release — e.g. a delayed backup run — must still check, so it
-            # can't double-book what the primary run just grabbed.
-            if not WAIT_FOR_RELEASE or not (0 <= seconds_to_release() <= 90):
-                already_booked = booked_dates(page)
+        try:
+            _book(browser, page)
+        except BaseException as e:
+            # Capture the page at the moment of failure (the Lambda uploads
+            # screenshots to S3 afterwards). Normal early exits are skipped.
+            if not (isinstance(e, SystemExit) and not e.code):
+                shot(page, "error")
+            raise
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
-        target = expected_target()
-        if (target.year, target.month, target.day) in already_booked:
-            log(f"Expected release date {target:%B %d} is already booked — "
-                "nothing to do.")
+
+def _book(browser, page) -> None:
+    """The booking run itself, once the browser and page exist."""
+
+    already_booked = set()
+    if SKIP_LOGIN:
+        log("SKIP_LOGIN=true — testing without an account.")
+        page.goto(SERVICE_URL, wait_until="domcontentloaded")
+        page.wait_for_timeout(3000)
+        dismiss_cookie_banner(page)
+    else:
+        login(page)
+        # Skip the bookings check only in the last seconds before release
+        # (never eat into the booking race). A run that starts after
+        # release — e.g. a delayed backup run — must still check, so it
+        # can't double-book what the primary run just grabbed.
+        if not WAIT_FOR_RELEASE or not (0 <= seconds_to_release() <= 90):
+            already_booked = booked_dates(page)
+
+    target = expected_target()
+    if (target.year, target.month, target.day) in already_booked:
+        log(f"Expected release date {target:%B %d} is already booked — "
+            "nothing to do.")
+        browser.close()
+        return
+    log(f"Target: {target:%A %B %d, %Y} at 11:00 a.m. "
+        f"(fallback scan after {FALLBACK_SCAN_AFTER}s)")
+
+    # Do all the slow page work now, while there is still time, so the
+    # moment the studio opens booking we only need quick date clicks.
+    prepare_calendar(page, target)
+
+    # Before release the target shows "not yet open" if the class exists.
+    # If it consistently shows "No availability" instead, there is no
+    # class that day (a holiday) — stop quietly rather than fail later.
+    if WAIT_FOR_RELEASE and seconds_to_release() > 30:
+        pre = []
+        for _ in range(3):
+            pre.append(slot_state(page, target, refresh=True)[0])
+            if pre[-1] in ("notyet", "open", "waitlist", "closed"):
+                break
+            page.wait_for_timeout(3000)
+        log(f"Pre-release check of {target:%b %d}: {', '.join(pre)}")
+        if all(st == "none" for st in pre):
+            log(f"No 11:00 class is scheduled on {target:%A %B %d} — "
+                "nothing to book this week.")
             browser.close()
             return
-        log(f"Target: {target:%A %B %d, %Y} at 11:00 a.m. "
-            f"(fallback scan after {FALLBACK_SCAN_AFTER}s)")
 
-        # Do all the slow page work now, while there is still time, so the
-        # moment the studio opens booking we only need quick date clicks.
-        prepare_calendar(page, target)
+    if WAIT_FOR_RELEASE:
+        wait_until_release()
 
-        # Before release the target shows "not yet open" if the class exists.
-        # If it consistently shows "No availability" instead, there is no
-        # class that day (a holiday) — stop quietly rather than fail later.
-        if WAIT_FOR_RELEASE and seconds_to_release() > 30:
-            pre = []
-            for _ in range(3):
-                pre.append(slot_state(page, target, refresh=True)[0])
-                if pre[-1] in ("notyet", "open", "waitlist", "closed"):
-                    break
-                page.wait_for_timeout(3000)
-            log(f"Pre-release check of {target:%b %d}: {', '.join(pre)}")
-            if all(st == "none" for st in pre):
-                log(f"No 11:00 class is scheduled on {target:%A %B %d} — "
-                    "nothing to book this week.")
-                browser.close()
-                return
-
-        if WAIT_FOR_RELEASE:
-            wait_until_release()
-
-        start = time.time()
-        deadline = start + MAX_POLL_MINUTES * 60
-        fallback_at = start + FALLBACK_SCAN_AFTER
-        attempt = 0
-        need_reload = False
-        seen_states = set()
-        while True:
-            attempt += 1
-            slot, chosen = None, None
-            if time.time() < fallback_at:
-                # Fast path: re-check only the expected release date,
-                # without reloading the page unless something went wrong.
-                state = "error"
-                try:
-                    if need_reload or attempt % 40 == 0:
-                        prepare_calendar(page, target)
-                        need_reload = False
-                    state, slot = slot_state(page, target, refresh=True)
-                    chosen = target
-                except Exception as e:
-                    log(f"Poll {attempt} hit an error ({type(e).__name__}) — "
-                        "will reload the page.")
-                    need_reload = True
-                log(f"Poll {attempt}: {target:%b %d} 11:00 slot {state}")
-                seen_states.add(state)
-                if state == "waitlist":
-                    # A full class only offers the waitlist and never frees
-                    # up again, so there is nothing left to wait for.
-                    shot(page, "class-full")
-                    raise RuntimeError(
-                        f"{target:%A %B %d} 11:00 class is already full "
-                        "(waitlist only) — could not book.")
-            else:
-                # Fallback: scan every unbooked Saturday, farthest first.
-                prepare_calendar(page, target)
-                log(f"Attempt {attempt}: expected date not open — full scan.")
-                for sat in candidate_saturdays():
-                    if (sat.year, sat.month, sat.day) in already_booked:
-                        log(f"Skipping {sat:%B %d} — already booked.")
-                        continue
-                    slot = open_slot_for(page, sat)
-                    if slot is not None:
-                        chosen = sat
-                        break
-
-            if slot is not None:
-                t_seen = time.time()
-                # Wix renders a styled chip over the real input, so a normal
-                # click gets intercepted; it also auto-checks the input when
-                # the day has a single slot.
-                try:
-                    already = slot.is_checked()
-                except Exception:
-                    already = False
-                if not already:
-                    slot.click(force=True)
-                page.get_by_role("button",
-                                 name=re.compile(r"^\s*next\s*$", re.I)).first.click()
-                log(f"Open 11:00 a.m. slot on {chosen:%A %B %d, %Y} — booking!")
-                complete_booking(page, t_seen)
-                break
-
-            if time.time() > deadline:
-                shot(page, "gave-up")
-                if seen_states <= {"none", "unknown", "error"}:
-                    raise RuntimeError(
-                        f"No 11:00 class ever appeared for {target:%A %B %d} "
-                        f"in {MAX_POLL_MINUTES} minutes after release. If the "
-                        f"studio has no class that day, add "
-                        f"{target:%Y-%m-%d} to the Lambda's SKIP_DATES.")
+    start = time.time()
+    deadline = start + MAX_POLL_MINUTES * 60
+    fallback_at = start + FALLBACK_SCAN_AFTER
+    attempt = 0
+    need_reload = False
+    seen_states = set()
+    while True:
+        attempt += 1
+        slot, chosen = None, None
+        if time.time() < fallback_at:
+            # Fast path: re-check only the expected release date,
+            # without reloading the page unless something went wrong.
+            state = "error"
+            try:
+                if need_reload or attempt % 40 == 0:
+                    prepare_calendar(page, target)
+                    need_reload = False
+                state, slot = slot_state(page, target, refresh=True)
+                chosen = target
+            except Exception as e:
+                log(f"Poll {attempt} hit an error ({type(e).__name__}) — "
+                    "will reload the page.")
+                need_reload = True
+            log(f"Poll {attempt}: {target:%b %d} 11:00 slot {state}")
+            seen_states.add(state)
+            if state == "waitlist":
+                # A full class only offers the waitlist and never frees
+                # up again, so there is nothing left to wait for.
+                shot(page, "class-full")
                 raise RuntimeError(
-                    f"No open Saturday slot appeared within "
-                    f"{MAX_POLL_MINUTES} minutes (saw: "
-                    f"{', '.join(sorted(seen_states))}). Screenshot saved.")
-            if attempt % 10 == 0:
-                log(f"Attempt {attempt}: not open yet, still retrying…")
-            time.sleep(0.1 if time.time() < fallback_at else 2)
+                    f"{target:%A %B %d} 11:00 class is already full "
+                    "(waitlist only) — could not book.")
+        else:
+            # Fallback: scan every unbooked Saturday, farthest first.
+            prepare_calendar(page, target)
+            log(f"Attempt {attempt}: expected date not open — full scan.")
+            for sat in candidate_saturdays():
+                if (sat.year, sat.month, sat.day) in already_booked:
+                    log(f"Skipping {sat:%B %d} — already booked.")
+                    continue
+                slot = open_slot_for(page, sat)
+                if slot is not None:
+                    chosen = sat
+                    break
 
-        browser.close()
+        if slot is not None:
+            t_seen = time.time()
+            # Wix renders a styled chip over the real input, so a normal
+            # click gets intercepted; it also auto-checks the input when
+            # the day has a single slot.
+            try:
+                already = slot.is_checked()
+            except Exception:
+                already = False
+            if not already:
+                slot.click(force=True)
+            page.get_by_role("button",
+                             name=re.compile(r"^\s*next\s*$", re.I)).first.click()
+            log(f"Open 11:00 a.m. slot on {chosen:%A %B %d, %Y} — booking!")
+            complete_booking(page, t_seen)
+            break
+
+        if time.time() > deadline:
+            shot(page, "gave-up")
+            if seen_states <= {"none", "unknown", "error"}:
+                raise RuntimeError(
+                    f"No 11:00 class ever appeared for {target:%A %B %d} "
+                    f"in {MAX_POLL_MINUTES} minutes after release. If the "
+                    f"studio has no class that day, add "
+                    f"{target:%Y-%m-%d} to the Lambda's SKIP_DATES.")
+            raise RuntimeError(
+                f"No open Saturday slot appeared within "
+                f"{MAX_POLL_MINUTES} minutes (saw: "
+                f"{', '.join(sorted(seen_states))}). Screenshot saved.")
+        if attempt % 10 == 0:
+            log(f"Attempt {attempt}: not open yet, still retrying…")
+        time.sleep(0.1 if time.time() < fallback_at else 2)
+
+    browser.close()
 
 
 if __name__ == "__main__":

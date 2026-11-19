@@ -14,3 +14,5 @@ awslambdaric==2.2.1
 # doesn't ship it at the OS level, so ZoneInfo("America/Toronto") fails
 # without this pure-Python fallback copy of the same database.
 tzdata
+# Uploads screenshots to S3 (the Playwright base image doesn't ship it).
+boto3
