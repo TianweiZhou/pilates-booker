@@ -26,6 +26,7 @@ Configuration (environment variables):
   MAX_POLL_MINUTES   how long to keep retrying after release (default: 3)
   LOOKAHEAD_DAYS     how far ahead to look for Saturdays (default: 45)
   HEADLESS           "false" to watch the browser     (default: true)
+  SKIP_DATES         no-class Saturdays, e.g. "2026-12-26,2027-01-02"
   SCREENSHOT_DIR     where to save screenshots  (default: ./screenshots;
                       the Lambda Dockerfile sets this to /tmp/screenshots)
 
@@ -63,6 +64,10 @@ TARGET_OFFSET_DAYS = int(os.environ.get("TARGET_OFFSET_DAYS", "30"))
 FALLBACK_SCAN_AFTER = int(os.environ.get("FALLBACK_SCAN_AFTER", "180"))
 LOOKAHEAD_DAYS = int(os.environ.get("LOOKAHEAD_DAYS", "45"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
+# Saturdays with no class (holidays), comma-separated YYYY-MM-DD. If the
+# Thursday's target date is listed, the run exits without doing anything.
+SKIP_DATES = {d.strip() for d in os.environ.get("SKIP_DATES", "").split(",")
+              if d.strip()}
 
 # When the studio opens booking on Thursdays (America/Toronto). Override
 # with the RELEASE_HOUR env var if the studio changes it. This is the
@@ -486,6 +491,10 @@ def complete_booking(page) -> None:
 
 # ------------------------------------------------------------------- main ---
 def main() -> None:
+    target = expected_target()
+    if f"{target:%Y-%m-%d}" in SKIP_DATES:
+        log(f"{target:%A %B %d} is in SKIP_DATES (no class) — nothing to do.")
+        return
     if not SKIP_LOGIN and (not EMAIL or not PASSWORD):
         sys.exit("Set PILATES_EMAIL and PILATES_PASSWORD.")
 
@@ -555,6 +564,7 @@ def main() -> None:
         fallback_at = start + FALLBACK_SCAN_AFTER
         attempt = 0
         need_reload = False
+        seen_states = set()
         while True:
             attempt += 1
             slot, chosen = None, None
@@ -573,6 +583,7 @@ def main() -> None:
                         "will reload the page.")
                     need_reload = True
                 log(f"Poll {attempt}: {target:%b %d} 11:00 slot {state}")
+                seen_states.add(state)
                 if state == "waitlist":
                     # A full class only offers the waitlist and never frees
                     # up again, so there is nothing left to wait for.
@@ -613,9 +624,16 @@ def main() -> None:
 
             if time.time() > deadline:
                 shot(page, "gave-up")
+                if seen_states <= {"none", "unknown", "error"}:
+                    raise RuntimeError(
+                        f"No 11:00 class ever appeared for {target:%A %B %d} "
+                        f"in {MAX_POLL_MINUTES} minutes after release. If the "
+                        f"studio has no class that day, add "
+                        f"{target:%Y-%m-%d} to the Lambda's SKIP_DATES.")
                 raise RuntimeError(
                     f"No open Saturday slot appeared within "
-                    f"{MAX_POLL_MINUTES} minutes. Screenshot saved.")
+                    f"{MAX_POLL_MINUTES} minutes (saw: "
+                    f"{', '.join(sorted(seen_states))}). Screenshot saved.")
             if attempt % 10 == 0:
                 log(f"Attempt {attempt}: not open yet, still retrying…")
             time.sleep(0.3 if time.time() < fallback_at else 2)
