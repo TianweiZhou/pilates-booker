@@ -266,7 +266,7 @@ def _select_day(page, d: datetime) -> bool:
             .first.wait_for(state="visible", timeout=8000)
     except PWTimeout:
         pass
-    page.wait_for_timeout(300)
+    page.wait_for_timeout(150)
     return True
 
 
@@ -291,8 +291,10 @@ def slot_state(page, d: datetime, refresh: bool = False):
       "open"     bookable — slot is the element to click
       "waitlist" class is full ("11:00 a.m. Waitlist" / "Join Waitlist");
                  a full class never frees up again, spots go to the waitlist
+      "notyet"   "The 11:00 a.m. slot is not yet open for booking" — the
+                 class exists; booking opens 30 days before it starts
       "closed"   "The 11:00 a.m. slot is closed for booking"
-      "none"     the date shows "No availability" (not released yet)
+      "none"     the date shows "No availability" — no class that day
       "unknown"  nothing recognisable rendered yet
     """
     if not goto_month(page, d):
@@ -329,8 +331,15 @@ def slot_state(page, d: datetime, refresh: bool = False):
             continue
         if re.search(r"wait\s*list", label, re.I):
             return "waitlist", None
+        if re.search(r"not yet open", label, re.I):
+            return "notyet", None
         if re.search(r"closed", label, re.I):
             return "closed", None
+        try:
+            if not slot.is_enabled():
+                return "notyet", None
+        except Exception:
+            pass
         return "open", slot
 
     body = page.locator("body").inner_text()
@@ -399,58 +408,46 @@ def seconds_to_release() -> float:
     return (release - now).total_seconds()
 
 
-def complete_booking(page) -> None:
-    """From the booking form: waiver + plan payment + final book click."""
-    # Wait for the form to render rather than sleeping a fixed 2.5s.
+def complete_booking(page, t_seen: float) -> None:
+    """From the booking form: waiver + plan payment + final book click.
+
+    This runs while the class is filling up, so nothing here sleeps for a
+    fixed time or takes a screenshot before the final click — each step only
+    waits for the element it needs. t_seen is when the open slot was seen.
+    """
+    book_btn = page.get_by_role("button", name=re.compile(r"^\s*book\s*now\s*$", re.I))
+    buy_btn = page.get_by_role("button", name=re.compile(r"buy a plan", re.I))
     try:
-        page.get_by_text(re.compile(r"Booking Details|Client Details", re.I)) \
-            .first.wait_for(state="visible", timeout=20000)
+        book_btn.or_(buy_btn).first.wait_for(state="visible", timeout=15000)
     except PWTimeout:
         pass
-    page.wait_for_timeout(1000)
     hide_chat_widget(page)
-    shot(page, "booking-form")
 
-    # Waiver / agreement checkboxes.
+    # Waiver / agreement checkbox(es). Styled overlays intercept normal
+    # clicks, hence force.
     boxes = page.locator('input[type="checkbox"]')
     for i in range(boxes.count()):
-        box = boxes.nth(i)
         try:
+            box = boxes.nth(i)
             if not box.is_checked():
-                box.check(force=True)  # styled overlay intercepts normal clicks
-                log("Checked an agreement checkbox.")
+                box.check(force=True)
         except Exception:
             continue
 
-    body = page.locator("body").inner_text()
-
-    # Prefer a payment option that is an existing plan: Wix labels active
-    # plans with remaining-session text like "5 sessions left".
-    plan = page.get_by_text(re.compile(r"session[s]? left|membership",
-                                       re.I)).first
-    try:
-        if plan.is_visible(timeout=3000):
-            plan.click()
-            log("Selected existing plan as payment.")
-            page.wait_for_timeout(800)
-    except Exception:
-        log("No 'sessions left' plan label found — relying on the "
-            "pre-selected payment option.")
-
-    # Find the final CTA. With a valid plan it reads "Book Now" (or similar).
-    cta = None
-    for pattern in [r"^\s*book\s*(now)?\s*$", r"^\s*confirm\s*"]:
-        loc = page.get_by_role("button", name=re.compile(pattern, re.I)).last
+    # The member's existing plan is normally pre-selected (the button then
+    # reads "Book Now"); click it only if the button still offers to buy one.
+    if not book_btn.first.is_visible():
+        plan = page.get_by_text(re.compile(r"session[s]? left", re.I)).first
         try:
-            if loc.is_visible(timeout=2000):
-                cta = loc
-                break
+            if plan.is_visible():
+                plan.click()
+                book_btn.first.wait_for(state="visible", timeout=3000)
         except Exception:
-            continue
+            pass
 
-    if cta is None:
+    if not book_btn.first.is_visible():
         shot(page, "no-book-button")
-        if re.search(r"buy a plan", body, re.I):
+        if buy_btn.first.is_visible():
             raise RuntimeError(
                 "The form only offers 'Buy a plan' — your package may be "
                 "used up or not detected. NOT purchasing anything. "
@@ -459,31 +456,33 @@ def complete_booking(page) -> None:
                            "Screenshot saved.")
 
     if DRY_RUN:
+        log(f"DRY_RUN=true — reached 'Book Now' {time.time() - t_seen:.1f}s "
+            "after the slot was seen; stopping before the final click.")
         shot(page, "dry-run-stop")
-        log("DRY_RUN=true — stopping before the final booking click. "
-            "Everything up to payment worked.")
         return
 
-    cta.click()
+    book_btn.first.click()
+    log(f"Clicked 'Book Now' {time.time() - t_seen:.1f}s after the slot "
+        "was seen.")
 
-    # Booking takes a while to process; poll for the outcome.
+    # The booking is submitted; now just wait for the outcome.
     success_re = re.compile(r"confirmed|you.?re booked|thank you|"
                             r"booking number|see you|added to (your )?calendar",
                             re.I)
     already_re = re.compile(r"already (have|booked)", re.I)
     deadline = time.time() + 90
     while time.time() < deadline:
-        page.wait_for_timeout(3000)
+        page.wait_for_timeout(1500)
         body = page.locator("body").inner_text()
         if success_re.search(body):
+            log(f"✅ Booking confirmed! ({time.time() - t_seen:.1f}s after "
+                "the slot was seen)")
             shot(page, "confirmed")
-            log("✅ Booking confirmed!")
             return
         if already_re.search(body):
-            shot(page, "already-booked")
             log("ℹ️ You already have a booking for this session — nothing to do.")
+            shot(page, "already-booked")
             return
-        # Still on the form with the spinner? keep waiting.
     shot(page, "after-book-click")
     raise RuntimeError("Clicked book, but saw no confirmation within 90s — "
                        "check the screenshots and your bookings page.")
@@ -556,6 +555,23 @@ def main() -> None:
         # moment the studio opens booking we only need quick date clicks.
         prepare_calendar(page, target)
 
+        # Before release the target shows "not yet open" if the class exists.
+        # If it consistently shows "No availability" instead, there is no
+        # class that day (a holiday) — stop quietly rather than fail later.
+        if WAIT_FOR_RELEASE and seconds_to_release() > 30:
+            pre = []
+            for _ in range(3):
+                pre.append(slot_state(page, target, refresh=True)[0])
+                if pre[-1] in ("notyet", "open", "waitlist", "closed"):
+                    break
+                page.wait_for_timeout(3000)
+            log(f"Pre-release check of {target:%b %d}: {', '.join(pre)}")
+            if all(st == "none" for st in pre):
+                log(f"No 11:00 class is scheduled on {target:%A %B %d} — "
+                    "nothing to book this week.")
+                browser.close()
+                return
+
         if WAIT_FOR_RELEASE:
             wait_until_release()
 
@@ -605,7 +621,7 @@ def main() -> None:
                         break
 
             if slot is not None:
-                log(f"Open 11:00 a.m. slot on {chosen:%A %B %d, %Y} — booking!")
+                t_seen = time.time()
                 # Wix renders a styled chip over the real input, so a normal
                 # click gets intercepted; it also auto-checks the input when
                 # the day has a single slot.
@@ -615,11 +631,10 @@ def main() -> None:
                     already = False
                 if not already:
                     slot.click(force=True)
-                page.wait_for_timeout(400)
-                shot(page, "slot-selected")
                 page.get_by_role("button",
                                  name=re.compile(r"^\s*next\s*$", re.I)).first.click()
-                complete_booking(page)
+                log(f"Open 11:00 a.m. slot on {chosen:%A %B %d, %Y} — booking!")
+                complete_booking(page, t_seen)
                 break
 
             if time.time() > deadline:
@@ -636,7 +651,7 @@ def main() -> None:
                     f"{', '.join(sorted(seen_states))}). Screenshot saved.")
             if attempt % 10 == 0:
                 log(f"Attempt {attempt}: not open yet, still retrying…")
-            time.sleep(0.3 if time.time() < fallback_at else 2)
+            time.sleep(0.1 if time.time() < fallback_at else 2)
 
         browser.close()
 
