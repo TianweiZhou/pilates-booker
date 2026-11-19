@@ -18,6 +18,7 @@ on:
 permissions:
   id-token: write   # required to request the OIDC token
   contents: read
+  issues: write     # to open an issue if the build or deploy fails
 
 env:
   AWS_REGION: us-east-1
@@ -80,3 +81,20 @@ jobs:
             echo "Pushed: $ECR_REPOSITORY:${{ github.sha }} and :latest"
             echo "Deployed to Lambda function: $LAMBDA_FUNCTION_NAME"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open an issue if the build or deploy failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Build/deploy failed — $(date -u +%Y-%m-%d)"
+          body="The **${{ github.workflow }}** run for commit \`${{ github.sha }}\` failed, so Lambda is still running the previous image.
+
+          Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --repo "${{ github.repository }}" --state open --search "\"$title\" in:title" --json number --jq '.[0].number')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" --body "$body"
+          else
+            gh label create deploy-failure --repo "${{ github.repository }}" --color B60205 2>/dev/null || true
+            gh issue create --repo "${{ github.repository }}" --title "$title" --body "$body" --label deploy-failure
+          fi

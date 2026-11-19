@@ -9,6 +9,7 @@ to find and fix without digging through CloudWatch first.
 """
 import json
 import os
+import threading
 import traceback
 import urllib.error
 import urllib.request
@@ -74,8 +75,40 @@ def _issue_body(detail: str, request_id: str) -> str:
     )
 
 
+def _issue_title() -> str:
+    return f"Pilates booking failed — {datetime.now(book_class.TZ):%Y-%m-%d}"
+
+
+def _start_timeout_watchdog(context, request_id: str):
+    """File an issue shortly before Lambda's hard timeout. A timeout kills
+    the process outright, so the except blocks below never get to run."""
+    get_remaining = getattr(context, "get_remaining_time_in_millis", None)
+    if get_remaining is None:
+        return None
+    seconds_left = get_remaining() / 1000 - 30
+    if seconds_left <= 0:
+        return None
+    timer = threading.Timer(seconds_left, lambda: _file_github_issue(
+        _issue_title(),
+        _issue_body("The run was still going 30s before the Lambda timeout "
+                    "and is about to be killed — no booking was made.",
+                    request_id)))
+    timer.daemon = True
+    timer.start()
+    return timer
+
+
 def handler(event, context):
     request_id = getattr(context, "aws_request_id", "unknown")
+    watchdog = _start_timeout_watchdog(context, request_id)
+    try:
+        return _run(request_id)
+    finally:
+        if watchdog:
+            watchdog.cancel()
+
+
+def _run(request_id: str):
     try:
         book_class.main()
         return {"ok": True}
@@ -87,7 +120,7 @@ def handler(event, context):
         if code != 0:
             msg = f"book_class.main() exited with code {code}"
             _file_github_issue(
-                f"Pilates booking failed — {datetime.now(book_class.TZ):%Y-%m-%d}",
+                _issue_title(),
                 _issue_body(msg, request_id),
             )
             raise RuntimeError(msg)
@@ -96,7 +129,7 @@ def handler(event, context):
         tb = traceback.format_exc()
         traceback.print_exc()
         _file_github_issue(
-            f"Pilates booking failed — {datetime.now(book_class.TZ):%Y-%m-%d}",
+            _issue_title(),
             _issue_body(tb, request_id),
         )
         raise
