@@ -3,7 +3,7 @@
 Auto-book the "Reformer Group (lvl3-Inter./Chinese)" class at Neutral Pilates.
 
 The studio releases the Saturday 11:00 a.m. class every Thursday at
-RELEASE_HOUR (12:00 noon in winter, 11:00 a.m. in summer) Eastern
+RELEASE_HOUR (11:00 a.m.) Eastern
 (America/Toronto). This script:
 
   1. Logs in with your member account (email + password).
@@ -19,11 +19,11 @@ Configuration (environment variables):
   PILATES_EMAIL      member account email            (required)
   PILATES_PASSWORD   member account password         (required)
   SERVICE_URL        booking calendar URL            (default: the lvl3 Chinese class)
-  RELEASE_HOUR       Thursday booking-open hour, ET   (default: 12)
+  RELEASE_HOUR       Thursday booking-open hour, ET   (default: 11)
   RELEASE_MINUTE     minute of that hour              (default: 0)
   WAIT_FOR_RELEASE   "true" = wait for the release time (default: true)
   DRY_RUN            "true" = do everything except the final booking click
-  MAX_POLL_MINUTES   how long to keep retrying after release (default: 20)
+  MAX_POLL_MINUTES   how long to keep retrying after release (default: 3)
   LOOKAHEAD_DAYS     how far ahead to look for Saturdays (default: 45)
   HEADLESS           "false" to watch the browser     (default: true)
   SCREENSHOT_DIR     where to save screenshots  (default: ./screenshots;
@@ -54,7 +54,7 @@ EMAIL = os.environ.get("PILATES_EMAIL", "")
 PASSWORD = os.environ.get("PILATES_PASSWORD", "")
 WAIT_FOR_RELEASE = os.environ.get("WAIT_FOR_RELEASE", "true").lower() == "true"
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-MAX_POLL_MINUTES = int(os.environ.get("MAX_POLL_MINUTES", "20"))
+MAX_POLL_MINUTES = int(os.environ.get("MAX_POLL_MINUTES", "3"))
 SKIP_LOGIN = os.environ.get("SKIP_LOGIN", "false").lower() == "true"  # testing only
 # The studio releases the Saturday that is 30 days after release Thursday.
 TARGET_OFFSET_DAYS = int(os.environ.get("TARGET_OFFSET_DAYS", "30"))
@@ -64,10 +64,10 @@ FALLBACK_SCAN_AFTER = int(os.environ.get("FALLBACK_SCAN_AFTER", "180"))
 LOOKAHEAD_DAYS = int(os.environ.get("LOOKAHEAD_DAYS", "45"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
-# When the studio opens booking on Thursdays (America/Toronto). Moved from
-# 11:00 to 12:00 for winter; set RELEASE_HOUR=11 on the Lambda to switch back
-# without a redeploy. This is the *release* time, not the class's own time.
-RELEASE_HOUR = int(os.environ.get("RELEASE_HOUR", "12"))
+# When the studio opens booking on Thursdays (America/Toronto). Override
+# with the RELEASE_HOUR env var if the studio changes it. This is the
+# *release* time, not the class's own time.
+RELEASE_HOUR = int(os.environ.get("RELEASE_HOUR", "11"))
 RELEASE_MINUTE = int(os.environ.get("RELEASE_MINUTE", "0"))
 # GitHub cron fires unpredictably late, so runs start hours early and sleep.
 # Only bail out if we somehow start earlier than this before release.
@@ -279,29 +279,43 @@ def prepare_calendar(page, d: datetime) -> None:
     goto_month(page, d)
 
 
-def open_slot_for(page, d: datetime, refresh: bool = False):
-    """Select date `d`; return the clickable open 11:00 slot or None."""
+def slot_state(page, d: datetime, refresh: bool = False):
+    """Select date `d` and report its 11:00 slot as (state, slot).
+
+    state is one of:
+      "open"     bookable — slot is the element to click
+      "waitlist" class is full ("11:00 a.m. Waitlist" / "Join Waitlist");
+                 a full class never frees up again, spots go to the waitlist
+      "closed"   "The 11:00 a.m. slot is closed for booking"
+      "none"     the date shows "No availability" (not released yet)
+      "unknown"  nothing recognisable rendered yet
+    """
     if not goto_month(page, d):
-        return None
+        return "unknown", None
     if refresh:
         # Every date click makes the site fetch fresh availability from its
         # API (~1s), so flipping to a neighbouring day and back re-checks
-        # the slot without the 30s+ full page reload that cost us the race.
+        # the slot without a slow full page reload.
         neighbour = d + timedelta(days=-1 if d.day > 1 else 1)
         _select_day(page, neighbour)
     if not _select_day(page, d):
-        return None
+        return "unknown", None
 
-    body = page.locator("body").inner_text()
-    if "No availability" in body:
-        return None
+    # The slot list renders a moment after the date header, especially on
+    # the first polls; give it up to 2.5s before calling the state unknown.
+    slot_any = page.get_by_role("checkbox", name=re.compile(r"11:00", re.I)).or_(
+        page.get_by_role("radio", name=re.compile(r"11:00", re.I))).or_(
+        page.get_by_text("No availability"))
+    try:
+        slot_any.first.wait_for(state="visible", timeout=2500)
+    except PWTimeout:
+        pass
 
-    # Open slots render as a selectable chip named like "11:00 a.m.".
-    # Closed ones are named "The 11:00 a.m. slot is closed for booking".
-    # A full class is labelled "11:00 a.m. Waitlist" and its button becomes
-    # "Join Waitlist" (no "Next"), so it must not count as open.
+    # Look at the slot element itself first: right after a date switch the
+    # page can still contain the neighbouring day's "No availability" text,
+    # which used to make a full class read as merely "not open".
     for role in ("checkbox", "radio"):
-        slot = page.get_by_role(role, name=re.compile(r"^11:00", re.I)).first
+        slot = page.get_by_role(role, name=re.compile(r"11:00", re.I)).first
         try:
             if not slot.is_visible():
                 continue
@@ -309,10 +323,23 @@ def open_slot_for(page, d: datetime, refresh: bool = False):
         except Exception:
             continue
         if re.search(r"wait\s*list", label, re.I):
-            log(f"{d:%b %d}: 11:00 slot is waitlist-only (class is full).")
-            return None
-        return slot
-    return None
+            return "waitlist", None
+        if re.search(r"closed", label, re.I):
+            return "closed", None
+        return "open", slot
+
+    body = page.locator("body").inner_text()
+    if "No availability" in body:
+        return "none", None
+    return "unknown", None
+
+
+def open_slot_for(page, d: datetime, refresh: bool = False):
+    """Select date `d`; return the clickable open 11:00 slot or None."""
+    state, slot = slot_state(page, d, refresh)
+    if state != "open":
+        log(f"{d:%b %d}: 11:00 slot {state}.")
+    return slot
 
 
 def booked_dates(page) -> set:
@@ -534,17 +561,25 @@ def main() -> None:
             if time.time() < fallback_at:
                 # Fast path: re-check only the expected release date,
                 # without reloading the page unless something went wrong.
+                state = "error"
                 try:
                     if need_reload or attempt % 40 == 0:
                         prepare_calendar(page, target)
                         need_reload = False
-                    slot, chosen = open_slot_for(page, target, refresh=True), target
+                    state, slot = slot_state(page, target, refresh=True)
+                    chosen = target
                 except Exception as e:
                     log(f"Poll {attempt} hit an error ({type(e).__name__}) — "
                         "will reload the page.")
                     need_reload = True
-                log(f"Poll {attempt}: {target:%b %d} 11:00 slot "
-                    f"{'OPEN' if slot else 'not open'}")
+                log(f"Poll {attempt}: {target:%b %d} 11:00 slot {state}")
+                if state == "waitlist":
+                    # A full class only offers the waitlist and never frees
+                    # up again, so there is nothing left to wait for.
+                    shot(page, "class-full")
+                    raise RuntimeError(
+                        f"{target:%A %B %d} 11:00 class is already full "
+                        "(waitlist only) — could not book.")
             else:
                 # Fallback: scan every unbooked Saturday, farthest first.
                 prepare_calendar(page, target)
